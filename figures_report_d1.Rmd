@@ -1,0 +1,444 @@
+---
+title: "COVAIL: Mediation of prior immunity effects on COVID-19 through neutralizing
+  antibody titers and CD4+ and CD8+ T cells"
+author: "Sydney Busch"
+date: "2025-09-23"
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(survival)
+library(ggplot2)
+library(ggpattern)
+library(magick)
+library(knitr)
+library(ggtext)
+```
+
+```{r}
+source("config_dX.R")
+
+dat_final <- readRDS("job_output/results/results_summary.rds") %>%
+  # add names
+  mutate(
+    names = case_when(
+      effect == "B_CD4" ~ "Day 1 CD4+ T cell effect",
+      effect == "B_CD8" ~ "Day 1 CD8+ T cell effect",
+      effect == "B_Ab" ~ "Day 1 antibody effect",
+      effect == "D15_CD4" ~ "Day 15 CD4+ T cell effect",
+      effect == "D15_CD8" ~ "Day 15 CD8+ T cell effect",
+      effect == "D15_Ab" ~ "Day 15 antibody effect",
+      effect == "direct" ~ "Unmeasured effect",
+      effect == "total" ~ "Total effect",
+      .default = NA
+    ),
+    names_short = case_when(
+      effect == "B_CD4" ~ "D1 CD4+",
+      effect == "B_CD8" ~ "D1 CD8+",
+      effect == "B_Ab" ~ "D1 Ab",
+      effect == "D15_CD4" ~ "D15 CD4+",
+      effect == "D15_CD8" ~ "D15 CD8+",
+      effect == "D15_Ab" ~ "D15 Ab",
+      effect == "direct" ~ "Unmeas.",
+      effect == "total" ~ "Total",
+      .default = NA
+    )
+  )
+
+# make into factors
+dat_final$names_short <- factor(
+  dat_final$names_short,
+  levels = c("D1 CD4+", "D1 CD8+", "D1 Ab", "D15 CD4+", "D15 CD8+", "D15 Ab", "Unmeas.")
+)
+
+dat_final$names <- factor(
+  dat_final$names,
+  levels = c("Day 1 CD4+ T cell effect", "Day 1 CD8+ T cell effect", 
+             "Day 1 antibody effect", "Day 15 CD4+ T cell effect",
+             "Day 15 CD8+ T cell effect", "Day 15 antibody effect", 
+             "Unmeasured effect")
+)
+
+# get combos of stim and trt group
+stim_trt_combos <- expand.grid(
+  stim = stims_input,
+  trt_group = trt_groups_input
+)
+
+```
+
+```{r}
+# make custom theme
+myTheme <- function(
+  # default size and font family
+  base_size = 11,
+  base_family = ""
+) {
+  # start w/ theme_bw
+  theme_bw(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      # Axis titles
+      axis.title = element_text(size = 11),
+      axis.title.x = element_text(size = 11, 
+                                  # move label down by increasing top margin
+                                  margin = margin(t = 5)
+                                  ),
+      axis.title.y = element_text(size = 11, angle = 90, 
+                                  # move label to the left by increasing right margin
+                                  margin = margin(r = 5)),
+      # Axis tick labels
+      axis.text = element_text(size = 9, color = "black"),
+      # Facet labels
+      strip.text = element_text(
+        size = 11,
+        # increase margin around facet label text
+        margin = margin(t = 3.5, r = 3.5, b = 3.5, l = 3.5),
+        # make facet label text white
+        color = "white"
+        ),
+      # make facet label background black
+      strip.background = element_rect(
+        fill = "black",    # background color
+        color = "black"    # border color
+      ),
+      # Legend
+      legend.title = element_text(size = 11), 
+      legend.text = element_text(size = 9)
+    )
+}
+
+```
+
+## Cumulative incidence curves
+
+```{r}
+# change shape of data to make cumulative incidence curves that can be faceted
+curve_wide <- dat_final %>%
+  ungroup() %>%
+  # keep Y1 - Y8
+  filter(effect %in% c("mean_Y1", "mean_Y2", "mean_Y3", "mean_Y4", 
+                       "mean_Y5", "mean_Y6", "mean_Y7", "mean_Y8")
+         ) %>%
+  # keep only necessary variables
+  select(stim, outcome_time, effect, value, bs_waldCI_LB, bs_waldCI_UB)
+
+# for total and path-specific effects, make wide versions of data
+# reference is the first positive term, manipulated is subtracted term
+Y1_Y2 <- curve_wide %>%
+  filter(effect %in% c("mean_Y1", "mean_Y2")) %>%
+  mutate(curve_effect = "Total",
+         Y = case_when(
+           effect == "mean_Y1" ~ "Reference",
+           effect == "mean_Y2" ~ "Manipulated"))
+
+Y1_Y3 <- curve_wide %>%
+  filter(effect %in% c("mean_Y1", "mean_Y3")) %>%
+  mutate(curve_effect = "Day 15 CD4+ T cells",
+         Y = case_when(
+           effect == "mean_Y1" ~ "Reference",
+           effect == "mean_Y3" ~ "Manipulated"))
+
+Y3_Y4 <- curve_wide %>%
+  filter(effect %in% c("mean_Y3", "mean_Y4")) %>%
+  mutate(curve_effect = "Day 15 CD8+ T cells",
+         Y = case_when(
+           effect == "mean_Y3" ~ "Reference",
+           effect == "mean_Y4" ~ "Manipulated"))
+
+Y4_Y5 <- curve_wide %>%
+  filter(effect %in% c("mean_Y4", "mean_Y5")) %>%
+  mutate(curve_effect = "Day 15 antibodies",
+         Y = case_when(
+           effect == "mean_Y4" ~ "Reference",
+           effect == "mean_Y5" ~ "Manipulated"))
+
+Y5_Y6 <- curve_wide %>%
+  filter(effect %in% c("mean_Y5", "mean_Y6")) %>%
+  mutate(curve_effect = "Day 1 CD4+ T cells",
+         Y = case_when(
+           effect == "mean_Y5" ~ "Reference",
+           effect == "mean_Y6" ~ "Manipulated"))
+
+Y6_Y7 <- curve_wide %>%
+  filter(effect %in% c("mean_Y6", "mean_Y7")) %>%
+  mutate(curve_effect = "Day 1 CD8+ T cells",
+         Y = case_when(
+           effect == "mean_Y6" ~ "Reference",
+           effect == "mean_Y7" ~ "Manipulated"))
+
+Y7_Y8 <- curve_wide %>%
+  filter(effect %in% c("mean_Y7", "mean_Y8")) %>%
+  mutate(curve_effect = "Day 1 antibodies",
+         Y = case_when(
+           effect == "mean_Y7" ~ "Reference",
+           effect == "mean_Y8" ~ "Manipulated"))
+
+Y8_Y2 <- curve_wide %>%
+  filter(effect %in% c("mean_Y8", "mean_Y2")) %>%
+  mutate(curve_effect = "Unmeasured",
+         Y = case_when(
+           effect == "mean_Y8" ~ "Reference",
+           effect == "mean_Y2" ~ "Manipulated"))
+
+# jon together
+curve_long <- Y1_Y2 %>%
+  bind_rows(Y1_Y3) %>%
+  bind_rows(Y3_Y4) %>%
+  bind_rows(Y4_Y5) %>%
+  bind_rows(Y5_Y6) %>%
+  bind_rows(Y6_Y7) %>%
+  bind_rows(Y7_Y8) %>%
+  bind_rows(Y8_Y2)
+
+# rename variables as factors
+curve_long$curve_effect <- factor(
+  curve_long$curve_effect,
+  levels = c("Total", "Day 15 CD4+ T cells", "Day 15 CD8+ T cells", 
+             "Day 15 antibodies",
+             "Day 1 CD4+ T cells", "Day 1 CD8+ T cells", 
+             "Day 1 antibodies",
+             "Unmeasured")
+)
+
+```
+
+```{r}
+
+# iterate through unique stim / trt group combos
+for (i in 1:nrow(stim_trt_combos)) {
+
+  # get data from one stim / trt group
+  dat_current <- curve_long %>%
+    filter(
+      stim == stim_trt_combos$stim[i],
+      # these outcomes times are only used for PM
+      outcome_time != 91,
+      outcome_time != 181
+    )
+
+  curve <- ggplot(data = dat_current) +
+    # confidence intervals
+    geom_ribbon(aes(x = outcome_time, ymin = bs_waldCI_LB, ymax = bs_waldCI_UB,
+                    fill = Y), alpha = .1) +
+    # curves
+    geom_line(aes(x = outcome_time, y = value, color = Y),
+              linewidth = .75) +
+    # colors for CI's (put reference first)
+    scale_color_manual(values = c("Reference" = "#07264E",
+                                  "Manipulated" = "#CC0001"),
+                       guide = guide_legend(reverse = TRUE)) +
+    # colors for curves (put reference first)
+    scale_fill_manual(values = c("Reference" = "#07264E",
+                                 "Manipulated" = "#CC0001"),
+                      guide = guide_legend(reverse = TRUE)) +
+    # specify tick labels
+    scale_x_continuous(breaks = seq(from = 0, to = 184, by = 20)) +
+    # facet wrap w/ 4 columns
+    facet_wrap(vars(curve_effect),
+               ncol = 4) + 
+    # add labels
+    labs(
+      title = stim_trt_combos$stim[i],
+      x = "Days post-D15 visit",
+      y = "Cumulative incidence (95% CI)",
+      fill = NULL,
+      color = NULL
+    ) +
+    # use custom theme
+    myTheme()  +
+    # change theme elements specifically for curves
+    theme(legend.position = "bottom",
+          # slant x axis text
+          axis.text.x = element_text(angle = 315, hjust = 0),
+          # axis titles
+          axis.title.x = element_text(size = 11),
+          axis.title.y = element_text(size = 11),
+          # axis tick labels
+          axis.text = element_text(size = 8),
+          # legend title and text
+          legend.text = element_text(size = 11),
+          strip.text = element_text(size = 9))
+
+    print(curve)
+    
+}
+```
+
+## Total effect decompositions
+
+```{r, fig.show="hold", out.width="100%"}
+
+# iterate through unique stim / trt group combos
+for (i in 1:nrow(stim_trt_combos)) {
+
+  # get data from one stim / trt group
+  dat_current <- dat_final %>%
+    filter(
+      stim == stim_trt_combos$stim[i],
+      trt_group == stim_trt_combos$trt_group[i],
+      outcome_time != 91,
+      outcome_time != 181
+    )
+
+  # subset to path-specific effects
+  dat_parts <- dat_current %>%
+    filter(type %in% c("D15", "B", "direct"))
+
+  #######################
+
+  total <- ggplot(data = dat_parts, aes(x = outcome_time, y = value)) +
+    # add pattern to bar plot
+    geom_col_pattern(
+      aes(
+        pattern = type,
+        fill = effect_new
+      ),
+      # use black for patterns and outlines of bars
+      color = "black",
+      pattern_fill = "black",
+      # spacing says how far apart pattern elements are
+      pattern_spacing = .015,
+      # size says how big pattern elements are
+      pattern_size = .02
+    ) +
+    # specify what patterns to use where
+    scale_pattern_manual(
+      values = c(B = "circle", D15 = "stripe", direct = "none"),
+      labels = c(B = "Day 1", D15 = "Day 15"),
+      breaks = c("B", "D15")
+    ) +
+    # use custom background colors on bars
+    scale_fill_manual(
+      values = c("#F2B0B0", "#FFD4A1", "#FDFD96", "#C2E9BF"),
+      labels = c(
+        CD4 = "CD4+ T cell pathways",
+        CD8 = "CD8+ T cell pathways",
+        Ab = "Antibody pathways",
+        direct = "Unmeasured pathways"
+      )
+    ) +
+    # specify tick mark labels
+    scale_x_continuous(breaks = seq(0, 184, 20)) +
+    # add labels
+    labs(
+      title = stim_trt_combos$stim[i],
+      x = "Days post-D15 visit",
+      y = "Effect size",
+      pattern = "Time point",
+      fill = "Effect through"
+    ) +
+    # use custom theme
+    myTheme() +
+    # specify legend elements
+    theme(
+      legend.position = c(0.02, 0.98),   # inside upper-left corner
+      legend.justification = c("left", "top"), # anchor top-left of legend to this point
+      legend.background = element_rect(fill = "white", color = NA) # legend background
+    ) +
+    guides(
+      fill = guide_legend(order = 1, # fill legend on top
+                          override.aes = list(pattern = "none")), # no patterns in colors
+      pattern = guide_legend(order = 2, # pattern legend below
+                             override.aes = list(fill = "white")), # no colors in patterns
+    )
+
+  print(total)
+
+}
+```
+
+## Proportion mediated: Two time points, all markers
+
+```{r, fig.show="hold", out.width="100%"}
+
+# get total and path-specific effects
+dat_PM <- dat_final %>%
+  filter(effect %in% c("B_Ab", "B_CD4", "B_CD8", "D15_Ab",
+                       "D15_CD4", "D15_CD8", "direct", "total"))
+
+# iterate through unique stim / trt group combos
+for (i in 1:nrow(stim_trt_combos)) {
+
+  # get data from one stim / trt group
+  dat_current <- dat_PM %>%
+    filter(
+      stim == stim_trt_combos$stim[i],
+      trt_group == stim_trt_combos$trt_group[i],
+      # Choose select outcome times
+      outcome_time %in% c(91, 181)
+    )
+
+  single_time <-
+    ggplot(data = dat_current[!dat_current$effect_new == "total",],
+           aes(x = names_short, y = PM)) +
+    # bar chart with patterns
+    geom_col_pattern(
+      aes(
+        # change pattern by variable "type"
+        pattern = type,
+        # change background color by variable "effect_new"
+        fill = effect_new),
+      # outline color of bars
+      color = "black",
+      # pattern color
+      pattern_fill = "black",
+      # spacing between repetitions of pattern (default = .05)
+      pattern_spacing = .015,
+      # stroke linewidth (default = 1)
+      pattern_size = .02
+    ) +
+    scale_pattern_manual(
+      # set custom patterns
+      values = c(B = "circle", D15 = "stripe", direct = "none"),
+      # legend labels
+      labels = c(B = "Baseline", D15 = "Day 15"),
+      breaks = c("B", "D15"),
+      # don't show fill colors on legend
+      guide = guide_legend(override.aes = list(fill = "white"))) +
+    scale_fill_manual(
+      # set custom colors for background
+      values = c("#F2B0B0", "#FFD4A1", "#FDFD96", "#C2E9BF"),
+      # legend labels
+      labels = c(CD4 = "CD4+ T cell pathways", CD8 = "CD8+ T cell pathways",
+                 Ab = "Antibody pathways", direct = "Unmeasured pathways"),
+      # don't show patterns on legend
+      guide = guide_legend(override.aes = list(pattern = "none"))) +
+    # Confidence intervals
+    geom_errorbar(aes(ymin = PM_waldCI_LB, ymax = PM_waldCI_UB),
+                  width = 0.2) +
+    # horizontal lines at 0 and 1
+    geom_hline(yintercept = 1, linetype = 2) +
+    geom_hline(yintercept = 0, linewidth = .5) +
+    # facet
+    facet_wrap(vars(outcome_time),
+               labeller = as_labeller(c("91" = "91 days post-D15 visit",
+                                        "181" = "181 days post-D15 visit"))) +
+    # add labels
+    labs(
+      title = stim_trt_combos$stim[i],
+      x = "",
+      y = "Proportion mediated (95% CI)",
+      pattern = "Time point",
+      fill = "Effect through"
+    ) +
+    # use custom theme
+    myTheme() +
+      theme(
+        # rotate axis labels
+        axis.text.x = element_text(angle = 315, hjust = 0)
+        )
+
+  print(single_time)
+
+}
+
+```
